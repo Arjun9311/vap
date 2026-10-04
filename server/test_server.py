@@ -1,6 +1,6 @@
 import unittest
 from fastapi.testclient import TestClient
-from main import app, clean_json, extract_cpp_code
+from main import app, clean_json, extract_cpp_code, ApiKeyPool
 
 class TestServerAPI(unittest.TestCase):
     def setUp(self):
@@ -136,5 +136,31 @@ class solution{
         self.assertIn('class solution', result)
         self.assertIn('calculateTotalRevenue', result)
 
+    def test_api_key_pool_rotation_and_rate_limit(self):
+        pool = ApiKeyPool("TestPool", ["key_alpha_12345", "key_beta_12345", "key_gamma_12345"])
+        self.assertEqual(pool.count(), 3)
+        self.assertTrue(pool.has_keys())
+
+        # First rotation
+        order1 = pool.get_key_order()
+        self.assertEqual(order1[0], "key_alpha_12345")
+
+        # Second rotation (round-robin)
+        order2 = pool.get_key_order()
+        self.assertEqual(order2[0], "key_beta_12345")
+
+        # Mark key_beta as rate-limited
+        pool.mark_rate_limited("key_beta_12345", cooldown_seconds=120)
+
+        # Third rotation: key_gamma should be first, and key_beta should be deprioritized to end
+        order3 = pool.get_key_order()
+        self.assertEqual(order3[0], "key_gamma_12345")
+        self.assertEqual(order3[-1], "key_beta_12345")
+
+        # Mark success removes cooldown
+        pool.mark_success("key_beta_12345")
+        self.assertNotIn("key_beta_12345", pool.cooldowns)
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -142,28 +142,114 @@ def extract_mcq_heuristic(text: str):
         return {"question": q_text[:200], "options": "\n".join(options[:6])}
     return None
 
-# Setup Groq
-api_key_groq = os.getenv("GROQ_API_KEY")
-client_groq = None
-if api_key_groq and len(api_key_groq.strip()) > 10 and "your_groq_api_key" not in api_key_groq:
-    try:
-        client_groq = Groq(api_key=api_key_groq.strip())
-    except Exception as e:
-        safe_print(f"Warning: Groq client initialization failed: {e}")
+# ── Multi-API-Key Pool & Rate Limit Management ────────────────────────────────
 
-# Setup Gemini (Free at https://aistudio.google.com and works with VPNs)
-api_key_gemini = os.getenv("GEMINI_API_KEY")
-if api_key_gemini and (len(api_key_gemini.strip()) < 10 or "your_" in api_key_gemini):
-    api_key_gemini = None
-elif api_key_gemini:
-    api_key_gemini = api_key_gemini.strip()
+def parse_api_keys(prefix: str) -> List[str]:
+    """Extract multiple API keys supporting comma/semicolon/space-separated values and numbered env vars."""
+    keys: List[str] = []
+    # 1. Main and plural variables, e.g. GROQ_API_KEY, GROQ_API_KEYS
+    for var_name in [f"{prefix}_API_KEY", f"{prefix}_API_KEYS"]:
+        raw = os.getenv(var_name, "")
+        if raw:
+            for part in re.split(r'[,;\s]+', raw):
+                p = part.strip()
+                if p and len(p) > 8 and "your_" not in p.lower() and p not in keys:
+                    keys.append(p)
+    # 2. Numbered variables, e.g. GROQ_API_KEY_1, GROQ_API_KEY_2, GROQ_API_KEY1...
+    for i in range(1, 21):
+        for pattern in [f"{prefix}_API_KEY_{i}", f"{prefix}_API_KEY{i}"]:
+            raw = os.getenv(pattern, "")
+            if raw:
+                for part in re.split(r'[,;\s]+', raw):
+                    p = part.strip()
+                    if p and len(p) > 8 and "your_" not in p.lower() and p not in keys:
+                        keys.append(p)
+    return keys
 
-# Setup OpenRouter
-api_key_openrouter = os.getenv("OPENROUTER_API_KEY")
-if api_key_openrouter and (len(api_key_openrouter.strip()) < 10 or "your_" in api_key_openrouter):
-    api_key_openrouter = None
-elif api_key_openrouter:
-    api_key_openrouter = api_key_openrouter.strip()
+
+class ApiKeyPool:
+    """Manages multiple API keys with round-robin rotation and automatic rate-limit backoff."""
+    def __init__(self, name: str, keys: List[str]):
+        self.name = name
+        self.keys: List[str] = keys
+        self.current_idx: int = 0
+        self.cooldowns: Dict[str, float] = {}
+
+    def __bool__(self) -> bool:
+        return len(self.keys) > 0
+
+    def has_keys(self) -> bool:
+        return len(self.keys) > 0
+
+    def count(self) -> int:
+        return len(self.keys)
+
+    def mark_rate_limited(self, key: str, cooldown_seconds: float = 60.0):
+        now = time.time()
+        self.cooldowns[key] = now + cooldown_seconds
+        masked = key[:6] + "..." + key[-4:] if len(key) > 10 else "***"
+        safe_print(f"[{self.name} Pool] ⚠️ Key {masked} hit rate limit / quota. Cooling down for {int(cooldown_seconds)}s.")
+
+    def mark_success(self, key: str):
+        if key in self.cooldowns:
+            del self.cooldowns[key]
+
+    def get_key_order(self) -> List[str]:
+        """Returns keys prioritized: active (not on cooldown) round-robin first, followed by earliest-expiring cooling keys."""
+        if not self.keys:
+            return []
+        now = time.time()
+        n = len(self.keys)
+        start = self.current_idx
+        self.current_idx = (self.current_idx + 1) % n
+
+        ordered = [self.keys[(start + i) % n] for i in range(n)]
+        available = [k for k in ordered if self.cooldowns.get(k, 0) <= now]
+        cooling = [k for k in ordered if self.cooldowns.get(k, 0) > now]
+        cooling.sort(key=lambda k: self.cooldowns.get(k, 0))
+
+        return available + cooling
+
+
+class GroqClientPool:
+    """Pool of Groq SDK clients initialized per available API key."""
+    def __init__(self, key_pool: ApiKeyPool):
+        self.key_pool = key_pool
+        self.clients: Dict[str, Groq] = {}
+        for key in self.key_pool.keys:
+            try:
+                self.clients[key] = Groq(api_key=key)
+            except Exception as e:
+                safe_print(f"Warning: Failed to initialize Groq client for key {key[:6]}...: {e}")
+
+    def __bool__(self) -> bool:
+        return bool(self.clients)
+
+    def has_clients(self) -> bool:
+        return bool(self.clients)
+
+    def count(self) -> int:
+        return len(self.clients)
+
+    def get_client_order(self) -> List[tuple[str, Groq]]:
+        keys = self.key_pool.get_key_order()
+        return [(k, self.clients[k]) for k in keys if k in self.clients]
+
+
+# Initialize Pools
+groq_pool = ApiKeyPool("Groq", parse_api_keys("GROQ"))
+groq_client_pool = GroqClientPool(groq_pool)
+
+gemini_pool = ApiKeyPool("Gemini", parse_api_keys("GEMINI"))
+openrouter_pool = ApiKeyPool("OpenRouter", parse_api_keys("OPENROUTER"))
+
+# Backward-compatibility variables
+api_key_groq = groq_pool.keys[0] if groq_pool.keys else None
+client_groq = next(iter(groq_client_pool.clients.values()), None)
+api_key_gemini = gemini_pool.keys[0] if gemini_pool.keys else None
+api_key_openrouter = openrouter_pool.keys[0] if openrouter_pool.keys else None
+
+safe_print(f"[*] AI Providers Loaded: Groq ({groq_pool.count()} keys), Gemini ({gemini_pool.count()} keys), OpenRouter ({openrouter_pool.count()} keys)")
 
 # Ollama model is configurable via .env
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
@@ -171,7 +257,7 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 # Max page text length to capture full problem statement, all examples, and constraints (~18k chars)
 MAX_TEXT_LENGTH = 18000
 
-app = FastAPI(title="Browser Assistant API", version="2.1.0")
+app = FastAPI(title="Browser Assistant API", version="2.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -206,19 +292,23 @@ class RefinementContent(BaseModel):
 async def health():
     return {
         "status": "ok",
-        "groq_configured": client_groq is not None,
-        "gemini_configured": bool(api_key_gemini),
-        "openrouter_configured": bool(api_key_openrouter),
+        "groq_configured": groq_client_pool.has_clients(),
+        "gemini_configured": gemini_pool.has_keys(),
+        "openrouter_configured": openrouter_pool.has_keys(),
+        "groq_keys_count": groq_pool.count(),
+        "gemini_keys_count": gemini_pool.count(),
+        "openrouter_keys_count": openrouter_pool.count(),
         "ollama_model": OLLAMA_MODEL,
         "vpn_detected": is_vpn_active(),
-        "version": "2.1.0"
+        "version": "2.2.0"
     }
 
 
 # ── AI providers ──────────────────────────────────────────────────────────────
 
 async def try_gemini(prompt: str, image_b64: str = None, max_tokens: int = 350) -> str:
-    if not api_key_gemini:
+    keys = gemini_pool.get_key_order()
+    if not keys:
         raise Exception("Gemini API key not configured")
 
     models = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.5-flash-lite"]
@@ -247,44 +337,73 @@ async def try_gemini(prompt: str, image_b64: str = None, max_tokens: int = 350) 
     }
 
     client = await get_http_client()
-    for model in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key_gemini}"
-        try:
-            resp = await client.post(url, json=payload, timeout=8.0)
-            if resp.status_code == 200:
-                data = resp.json()
-                candidates = data.get("candidates", [])
-                if candidates and "content" in candidates[0]:
-                    parts_resp = candidates[0]["content"].get("parts", [])
-                    if parts_resp:
-                        return parts_resp[0].get("text", "")
-                raise Exception("Unexpected Gemini response structure")
-            elif resp.status_code == 400 and "thinkingConfig" in resp.text:
-                fallback_payload = {
-                    "contents": [{"parts": parts}],
-                    "generationConfig": {
-                        "temperature": 0.0,
-                        "maxOutputTokens": max_tokens
-                    }
-                }
-                retry_resp = await client.post(url, json=fallback_payload, timeout=8.0)
-                if retry_resp.status_code == 200:
-                    candidates = retry_resp.json().get("candidates", [])
+    for key in keys:
+        key_rate_limited = False
+        for model in models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+            try:
+                resp = await client.post(url, json=payload, timeout=8.0)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candidates = data.get("candidates", [])
                     if candidates and "content" in candidates[0]:
                         parts_resp = candidates[0]["content"].get("parts", [])
                         if parts_resp:
+                            gemini_pool.mark_success(key)
                             return parts_resp[0].get("text", "")
-            last_err = Exception(f"Gemini ({model}) returned {resp.status_code}: {resp.text[:150]}")
-        except Exception as e:
-            last_err = e
-            safe_print(f"Gemini model {model} failed: {e}")
+                    raise Exception("Unexpected Gemini response structure")
+                
+                resp_text = resp.text
+                if resp.status_code == 429 or "RESOURCE_EXHAUSTED" in resp_text or "quota" in resp_text.lower():
+                    gemini_pool.mark_rate_limited(key, cooldown_seconds=60.0)
+                    key_rate_limited = True
+                    last_err = Exception(f"Gemini key rate-limited (HTTP {resp.status_code})")
+                    break
+
+                if resp.status_code == 400 and "thinkingConfig" in resp_text:
+                    fallback_payload = {
+                        "contents": [{"parts": parts}],
+                        "generationConfig": {
+                            "temperature": 0.0,
+                            "maxOutputTokens": max_tokens
+                        }
+                    }
+                    retry_resp = await client.post(url, json=fallback_payload, timeout=8.0)
+                    if retry_resp.status_code == 200:
+                        candidates = retry_resp.json().get("candidates", [])
+                        if candidates and "content" in candidates[0]:
+                            parts_resp = candidates[0]["content"].get("parts", [])
+                            if parts_resp:
+                                gemini_pool.mark_success(key)
+                                return parts_resp[0].get("text", "")
+                    elif retry_resp.status_code == 429 or "RESOURCE_EXHAUSTED" in retry_resp.text:
+                        gemini_pool.mark_rate_limited(key, cooldown_seconds=60.0)
+                        key_rate_limited = True
+                        last_err = Exception(f"Gemini key rate-limited (HTTP {retry_resp.status_code})")
+                        break
+
+                last_err = Exception(f"Gemini ({model}) returned {resp.status_code}: {resp_text[:150]}")
+            except Exception as e:
+                err_str = str(e).lower()
+                if "429" in err_str or "resource_exhausted" in err_str or "rate limit" in err_str:
+                    gemini_pool.mark_rate_limited(key, cooldown_seconds=60.0)
+                    key_rate_limited = True
+                    last_err = e
+                    break
+                last_err = e
+                safe_print(f"Gemini model {model} failed: {e}")
+                continue
+
+        if key_rate_limited:
+            safe_print(f"[Gemini] Key rate-limited. Trying next key in pool...")
             continue
 
     raise last_err
 
 
 async def try_openrouter(prompt: str, image_b64: str = None, max_tokens: int = 350) -> str:
-    if not api_key_openrouter:
+    keys = openrouter_pool.get_key_order()
+    if not keys:
         raise Exception("OpenRouter API key not configured")
 
     models = [
@@ -304,38 +423,59 @@ async def try_openrouter(prompt: str, image_b64: str = None, max_tokens: int = 3
         ]
 
     client = await get_http_client()
-    for model in models:
-        try:
-            resp = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key_openrouter}",
-                    "HTTP-Referer": "https://localhost",
-                    "X-Title": "Browser Assistant",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": content}],
-                    "temperature": 0.0,
-                    "max_tokens": max_tokens
-                },
-                timeout=7.0
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                return data["choices"][0]["message"]["content"]
-            else:
-                last_err = Exception(f"OpenRouter ({model}) returned {resp.status_code}: {resp.text[:150]}")
-        except Exception as e:
-            last_err = e
+    for key in keys:
+        key_rate_limited = False
+        for model in models:
+            try:
+                resp = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "HTTP-Referer": "https://localhost",
+                        "X-Title": "Browser Assistant",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": content}],
+                        "temperature": 0.0,
+                        "max_tokens": max_tokens
+                    },
+                    timeout=7.0
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    openrouter_pool.mark_success(key)
+                    return data["choices"][0]["message"]["content"]
+                
+                resp_text = resp.text
+                if resp.status_code in (429, 402) or "rate limit" in resp_text.lower():
+                    openrouter_pool.mark_rate_limited(key, cooldown_seconds=60.0)
+                    key_rate_limited = True
+                    last_err = Exception(f"OpenRouter key rate-limited/exhausted ({resp.status_code})")
+                    break
+
+                last_err = Exception(f"OpenRouter ({model}) returned {resp.status_code}: {resp_text[:150]}")
+            except Exception as e:
+                err_str = str(e).lower()
+                if "429" in err_str or "rate limit" in err_str:
+                    openrouter_pool.mark_rate_limited(key, cooldown_seconds=60.0)
+                    key_rate_limited = True
+                    last_err = e
+                    break
+                last_err = e
+                continue
+
+        if key_rate_limited:
+            safe_print(f"[OpenRouter] Key rate-limited. Trying next key in pool...")
             continue
 
     raise last_err
 
 
 async def try_groq(prompt: str, max_tokens: int = 350) -> str:
-    if not client_groq:
+    client_items = groq_client_pool.get_client_order()
+    if not client_items:
         raise Exception("Groq client not configured — set valid GROQ_API_KEY in .env")
     if is_vpn_active():
         return "VPN_BLOCKED_403"
@@ -350,28 +490,39 @@ async def try_groq(prompt: str, max_tokens: int = 350) -> str:
     ]
     last_err = None
 
-    for model in models_to_try:
-        try:
-            response = await loop.run_in_executor(
-                None,
-                lambda m=model: client_groq.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": "You are a structured data generator. You MUST return ONLY a valid JSON list of objects without any markdown formatting, explanations, or <think> tags outside the JSON."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    model=m,
-                    temperature=0.0,
-                    max_tokens=max_tokens,
-                ),
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            last_err = e
-            err_str = str(e).lower()
-            if "403" in err_str or "access denied" in err_str:
-                safe_print(f"[!] Groq 403 Access Denied on {model}: Cloudflare blocked this request due to datacenter/VPN IP.")
-                return "VPN_BLOCKED_403"
-            safe_print(f"Groq model {model} failed: {e}.")
+    for key, c_groq in client_items:
+        key_rate_limited = False
+        for model in models_to_try:
+            try:
+                response = await loop.run_in_executor(
+                    None,
+                    lambda m=model, cl=c_groq: cl.chat.completions.create(
+                        messages=[
+                            {"role": "system", "content": "You are a structured data generator. You MUST return ONLY a valid JSON list of objects without any markdown formatting, explanations, or <think> tags outside the JSON."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        model=m,
+                        temperature=0.0,
+                        max_tokens=max_tokens,
+                    ),
+                )
+                groq_pool.mark_success(key)
+                return response.choices[0].message.content
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                if "403" in err_str or "access denied" in err_str:
+                    safe_print(f"[!] Groq 403 Access Denied on {model}: Cloudflare blocked this request due to datacenter/VPN IP.")
+                    return "VPN_BLOCKED_403"
+                if "429" in err_str or "rate limit" in err_str or "rate_limit_exceeded" in err_str or "tpm" in err_str or "rpm" in err_str:
+                    groq_pool.mark_rate_limited(key, cooldown_seconds=60.0)
+                    key_rate_limited = True
+                    safe_print(f"[Groq] Key rate-limited on {model}: {e}. Switching to next key in pool...")
+                    break
+                safe_print(f"Groq model {model} failed: {e}.")
+
+        if key_rate_limited:
+            continue
 
     raise last_err
 
@@ -496,11 +647,11 @@ CRITICAL: Return ONLY the raw JSON list without markdown fences, explanation, or
     # 3. High-Speed Concurrent Fast-Race
     # Launch fastest available providers simultaneously
     tasks = {}
-    if api_key_gemini:
+    if gemini_pool.has_keys():
         tasks[asyncio.create_task(try_gemini(prompt, max_tokens=max_output_tokens))] = "gemini"
-    if api_key_openrouter:
+    if openrouter_pool.has_keys():
         tasks[asyncio.create_task(try_openrouter(prompt, max_tokens=max_output_tokens))] = "openrouter"
-    if client_groq and not is_vpn_active():
+    if groq_client_pool.has_clients() and not is_vpn_active():
         tasks[asyncio.create_task(try_groq(prompt, max_tokens=max_output_tokens))] = "groq"
 
     if tasks:
@@ -672,7 +823,7 @@ async def refine_solution(content: RefinementContent):
     errors = []
 
     # 1. Try Gemini
-    if api_key_gemini:
+    if gemini_pool.has_keys():
         try:
             safe_print("Attempting Gemini refinement...")
             result = await try_gemini(prompt, max_tokens=3500)
@@ -685,7 +836,7 @@ async def refine_solution(content: RefinementContent):
             safe_print(errors[-1])
 
     # 2. Try Groq
-    if client_groq:
+    if groq_client_pool.has_clients():
         try:
             safe_print("Attempting Groq refinement...")
             result = await try_groq(prompt, max_tokens=3500)
@@ -701,7 +852,7 @@ async def refine_solution(content: RefinementContent):
             safe_print(errors[-1])
 
     # 3. Try OpenRouter
-    if api_key_openrouter:
+    if openrouter_pool.has_keys():
         try:
             safe_print("Attempting OpenRouter refinement...")
             result = await try_openrouter(prompt, max_tokens=3500)
@@ -800,9 +951,9 @@ async def solve_vision(content: VisionContent):
 
     # 1. High-Speed Concurrent Vision Fast-Race
     tasks = {}
-    if api_key_gemini:
+    if gemini_pool.has_keys():
         tasks[asyncio.create_task(try_gemini(prompt, image_b64=image_data, max_tokens=3000))] = "gemini-vision"
-    if api_key_openrouter:
+    if openrouter_pool.has_keys():
         tasks[asyncio.create_task(try_openrouter(prompt, image_b64=image_data, max_tokens=3000))] = "openrouter-vision"
 
     if tasks:
@@ -836,45 +987,55 @@ async def solve_vision(content: VisionContent):
             return {"code": cpp_code, "results": winner_result, "provider": f"fast-race ({winner_provider})"}
 
     # 3. Try Groq Vision models
-    if client_groq:
+    if groq_client_pool.has_clients():
         vision_models = [
             "llama-3.2-11b-vision-preview",
             "llama-3.2-90b-vision-preview"
         ]
-        for vision_model in vision_models:
-            try:
-                safe_print(f"Attempting Groq Vision ({vision_model})...")
-                loop = asyncio.get_running_loop()
-                completion = await loop.run_in_executor(
-                    None,
-                    lambda model=vision_model: client_groq.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": prompt},
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {"url": f"data:image/png;base64,{image_data}"},
-                                    },
-                                ],
-                            }
-                        ],
-                        max_tokens=2048,
-                    ),
-                )
-                result = completion.choices[0].message.content
-                cleaned = clean_json(result)
-                if cleaned != "[]":
-                    cpp_code = extract_cpp_code(cleaned)
-                    return {"code": cpp_code, "results": cleaned, "provider": f"groq-vision ({vision_model})"}
-            except Exception as e:
-                err_msg = f"Groq Vision ({vision_model}) failed: {e}"
-                safe_print(err_msg)
-                errors.append(err_msg)
-                if "403" in str(e) or "access denied" in str(e).lower():
-                    break
+        client_items = groq_client_pool.get_client_order()
+        for key, c_groq in client_items:
+            key_rate_limited = False
+            for vision_model in vision_models:
+                try:
+                    safe_print(f"Attempting Groq Vision ({vision_model})...")
+                    loop = asyncio.get_running_loop()
+                    completion = await loop.run_in_executor(
+                        None,
+                        lambda model=vision_model, cl=c_groq: cl.chat.completions.create(
+                            model=model,
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": prompt},
+                                        {
+                                            "type": "image_url",
+                                            "image_url": {"url": f"data:image/png;base64,{image_data}"},
+                                        },
+                                    ],
+                                }
+                            ],
+                            max_tokens=2048,
+                        ),
+                    )
+                    result = completion.choices[0].message.content
+                    cleaned = clean_json(result)
+                    if cleaned != "[]":
+                        groq_pool.mark_success(key)
+                        cpp_code = extract_cpp_code(cleaned)
+                        return {"code": cpp_code, "results": cleaned, "provider": f"groq-vision ({vision_model})"}
+                except Exception as e:
+                    err_msg = f"Groq Vision ({vision_model}) failed: {e}"
+                    safe_print(err_msg)
+                    errors.append(err_msg)
+                    if "403" in str(e) or "access denied" in str(e).lower():
+                        break
+                    if "429" in str(e).lower() or "rate limit" in str(e).lower():
+                        groq_pool.mark_rate_limited(key, cooldown_seconds=60.0)
+                        key_rate_limited = True
+                        break
+            if key_rate_limited:
+                continue
 
     # 4. Try Ollama Vision fallback if available
     try:
@@ -913,13 +1074,13 @@ async def solve_vision(content: VisionContent):
             [{{"type": "mcq", "question": "...", "answer": "Option X: Content"}}] or
             [{{"type": "code", "title": "...", "languages": {{"cpp": "#include <bits/stdc++.h>\\nusing namespace std;\\n\\n..."}}, "constraints": "...", "input_output_format": "...", "examples_walkthrough": "...", "time_complexity": "...", "space_complexity": "...", "explanation": "..."}}]
             """
-            if api_key_gemini:
+            if gemini_pool.has_keys():
                 res = await try_gemini(text_prompt, max_tokens=3500)
                 cl = clean_json(res)
                 if cl != "[]":
                     cpp_code = extract_cpp_code(cl)
                     return {"code": cpp_code, "results": cl, "provider": "gemini (text-fallback)"}
-            if client_groq:
+            if groq_client_pool.has_clients():
                 result = await try_groq(text_prompt, max_tokens=3500)
                 if result != "VPN_BLOCKED_403":
                     cleaned = clean_json(result)
