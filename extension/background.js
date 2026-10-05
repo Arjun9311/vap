@@ -1,7 +1,7 @@
-// Background Service Worker for Browser Assistant (Manifest V3)
+// Background Service Worker for Dark Mode (Manifest V3)
 
 chrome.runtime.onInstalled.addListener((details) => {
-    console.log("Browser Assistant extension installed/updated:", details.reason);
+    console.log("Dark Mode extension installed/updated:", details.reason);
     chrome.storage.local.get(["serverUrl", "defaultMode"], (result) => {
         const updates = {};
         if (!result.serverUrl) updates.serverUrl = "http://localhost:8000";

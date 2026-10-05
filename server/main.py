@@ -257,7 +257,7 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 # Max page text length to capture full problem statement, all examples, and constraints (~18k chars)
 MAX_TEXT_LENGTH = 18000
 
-app = FastAPI(title="Browser Assistant API", version="2.2.0")
+app = FastAPI(title="Dark Mode API", version="2.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -432,7 +432,7 @@ async def try_openrouter(prompt: str, image_b64: str = None, max_tokens: int = 3
                     headers={
                         "Authorization": f"Bearer {key}",
                         "HTTP-Referer": "https://localhost",
-                        "X-Title": "Browser Assistant",
+                        "X-Title": "Dark Mode",
                         "Content-Type": "application/json"
                     },
                     json={

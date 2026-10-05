@@ -1,7 +1,7 @@
 @echo off
-title Browser Assistant Backend Server
+title Dark Mode Backend Server
 echo ===================================================
-echo     Starting Browser Assistant Backend Server
+echo     Starting Dark Mode Backend Server
 echo ===================================================
 
 :: Ensure local Ollama is running in background if available

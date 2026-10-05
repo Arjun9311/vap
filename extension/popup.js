@@ -26,7 +26,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Restrict on special browser URLs where content script cannot run
             if (url.startsWith('chrome://') || url.startsWith('edge://') || url.startsWith('chrome-extension://') || url.startsWith('about:')) {
-                alert('Browser Assistant cannot run on restricted browser internal pages. Please test on a standard webpage.');
+                alert('Dark Mode cannot run on restricted browser internal pages. Please test on a standard webpage.');
                 return;
             }
 

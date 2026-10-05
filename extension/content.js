@@ -1,7 +1,7 @@
-// Browser Assistant Content Script v2.1 (Manifest V3 Compatible)
+// Dark Mode Content Script v2.1 (Manifest V3 Compatible)
 
 (function () {
-    console.log("Browser Assistant v2.1 loaded.");
+    console.log("Dark Mode v2.1 loaded.");
 
     let SERVER = 'http://localhost:8000';
     let selectedMode = 'code'; // 'code' (primary), 'auto', 'mcq'
@@ -652,7 +652,7 @@
         if (isCollapsed) {
             const content = lastResultSummary || "";
             root.innerHTML = `
-                <div class="assistant-tab collapsed ${content ? 'has-answer' : ''}" id="assistant-trigger" data-content="${content}" title="Click to open Browser Assistant">
+                <div class="assistant-tab collapsed ${content ? 'has-answer' : ''}" id="assistant-trigger" data-content="${content}" title="Click to open Dark Mode">
                     ${isMinimalMode ? '<div class="assistant-mode-indicator">MIN</div>' : ''}
                 </div>
             `;
@@ -676,7 +676,7 @@
                     <div class="assistant-header">
                         <div class="assistant-title-row">
                             ${statusDot}
-                            <h3 class="assistant-title">Browser Assistant</h3>
+                            <h3 class="assistant-title">Dark Mode</h3>
                         </div>
                         <button class="assistant-close" id="assistant-close-btn" title="Minimize">&times;</button>
                     </div>

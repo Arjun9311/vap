@@ -1,4 +1,4 @@
-# Browser Assistant 🕵️‍♂️✨ v2.1 (Google Chrome Extension - Manifest V3)
+# Dark Mode 🕵️‍♂️✨ v2.1 (Google Chrome Extension - Manifest V3)
 
 A powerful, stealthy, and intelligent Chrome Extension for automated webpage scanning, MCQ solving, and coding assistance. Powered by **Groq** (cloud, primary) and **Ollama** (local fallback).
 
